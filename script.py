@@ -13,9 +13,10 @@ import requests
 from lxml import etree
 
 class GutenbergToStandardEbooks:
-    def __init__(self, html_file, author_name, book_title, language="en-US", 
-                 release_year=None, work_type="novel", subjects=None):
+    def __init__(self, html_file=None, markdown_file=None, author_name=None, book_title=None, 
+                 language="en-US", release_year=None, work_type="novel", subjects=None):
         self.html_file = html_file
+        self.markdown_file = markdown_file
         self.author_name = author_name
         self.book_title = book_title
         self.language = language
@@ -28,7 +29,6 @@ class GutenbergToStandardEbooks:
         self.se_path = self._find_se_executable()
         
     def _find_se_executable(self):
-        """Find the Standard Ebooks executable path."""
         possible_paths = [
             "se",
             os.path.expanduser("~/standardebooks/tools/se"),
@@ -49,7 +49,9 @@ class GutenbergToStandardEbooks:
         sys.exit(1)
     
     def load_html(self):
-        """Load and parse the Project Gutenberg HTML file."""
+        if not self.html_file:
+            return False
+            
         print(f"Loading HTML from {self.html_file}...")
         
         try:
@@ -66,13 +68,62 @@ class GutenbergToStandardEbooks:
             print(f"Error loading HTML: {e}")
             return False
     
-    def clean_gutenberg_html(self):
-        """Remove Project Gutenberg header, footer, and clean up the HTML."""
-        print("Cleaning up Project Gutenberg HTML...")
-        
-        if not self.soup:
-            print("HTML not loaded. Run load_html() first.")
+    def load_markdown(self):
+        if not self.markdown_file:
             return False
+            
+        print(f"Loading markdown from {self.markdown_file}...")
+        
+        try:
+            with open(self.markdown_file, 'r', encoding='utf-8') as file:
+                markdown_content = file.read()
+            
+            chapter_pattern = re.compile(r'##\s+(.*?)(?=##|\Z)', re.DOTALL)
+            
+            chapter_matches = chapter_pattern.findall(markdown_content)
+            
+            if not chapter_matches:
+                print("No chapters found in the markdown file.")
+                return False
+                
+            self.chapters = []
+            
+            for chapter_text in chapter_matches:
+                lines = chapter_text.strip().split('\n', 1)
+                chapter_title = lines[0].strip()
+                
+                chapter_content = lines[1].strip() if len(lines) > 1 else ""
+                
+                html_content = self._markdown_to_html(chapter_content)
+                
+                self.chapters.append({
+                    'title': chapter_title,
+                    'content': html_content
+                })
+            
+            print(f"Successfully parsed {len(self.chapters)} chapters from markdown.")
+            return True
+            
+        except Exception as e:
+            print(f"Error loading markdown: {e}")
+            return False
+    
+    def _markdown_to_html(self, markdown_text):
+        try:
+            wrapped_content = f"<div>{markdown_text}</div>"
+            soup = BeautifulSoup(wrapped_content, 'html.parser')
+            
+            return ''.join(str(tag) for tag in soup.div.contents)
+        except Exception as e:
+            print(f"Warning: Error formatting HTML content: {e}")
+            print("Falling back to basic content")
+            return f"<p>{markdown_text}</p>"
+    
+    def clean_gutenberg_html(self):
+        if not self.html_file or not self.soup:
+            return True  
+            
+        print("Cleaning up Project Gutenberg HTML...")
         
         header_patterns = [
             re.compile(r'The Project Gutenberg eBook.*?produced by', re.DOTALL | re.IGNORECASE),
@@ -102,14 +153,17 @@ class GutenbergToStandardEbooks:
         return True
     
     def identify_chapters(self):
-        """Identify and structure chapter content."""
+        if self.markdown_file or self.chapters:
+            return True
+            
         print("Identifying chapters...")
         
         chapter_patterns = [
             'h1', 'h2', 'h3',
             'div[class*=chapter]', 'div[id*=chapter]',
             'span[class*=chapter]', 'span[id*=chapter]',
-            '.chapter', '#chapter'
+            '.chapter', '#chapter',
+            '##'
         ]
         
         potential_chapters = []
@@ -163,7 +217,6 @@ class GutenbergToStandardEbooks:
         print(f"Identified {len(self.chapters)} chapters.")
     
     def _make_se_friendly_name(self, name):
-        """Convert a name to SE-friendly format."""
         name = name.lower()
         name = name.replace(' ', '-')
         name = re.sub(r'[^a-z0-9-]', '', name)
@@ -171,7 +224,6 @@ class GutenbergToStandardEbooks:
         return name
     
     def create_standard_ebooks_project(self):
-        """Create a new Standard Ebooks project."""
         print(f"Creating Standard Ebooks project for '{self.book_title}' by {self.author_name}...")
         
         cmd = [
@@ -247,7 +299,6 @@ class GutenbergToStandardEbooks:
             return False
     
     def generate_chapter_files(self):
-        """Generate Standard Ebooks XHTML files for each chapter."""
         if not self.project_dir or not self.chapters:
             print("Project not initialized or chapters not identified.")
             return False
@@ -282,18 +333,34 @@ class GutenbergToStandardEbooks:
             if roman_match:
                 title = f"Chapter {roman_match.group(1)}"
             
-            content_soup = BeautifulSoup(chapter['content'], 'html.parser')
+            content = chapter['content']
             
-            for header in content_soup.find_all(['h1', 'h2', 'h3', 'h4']):
-                if header.get_text().strip() == title:
-                    header.decompose()
-                    break
-            
-            content = str(content_soup)
+            try:
+                if isinstance(content, BeautifulSoup):
+                    content_soup = content
+                else:
+                    content_soup = BeautifulSoup(f"<div>{content}</div>", 'html.parser')
+                    
+                if hasattr(content_soup, 'div'):
+                    content = ''.join(str(tag) for tag in content_soup.div.contents)
+                else:
+                    content = str(content_soup)
+                    
+                for header in content_soup.find_all(['h1', 'h2', 'h3', 'h4']):
+                    if header.get_text().strip() == title:
+                        header.decompose()
+                
+                if hasattr(content_soup, 'div'):
+                    content = ''.join(str(tag) for tag in content_soup.div.contents)
+                else:
+                    content = str(content_soup)
+                    
+            except Exception as e:
+                print(f"Warning: Error parsing chapter {i} content: {e}")
+                content = f"<p>{content}</p>"
             
             content = content.replace('"', '"').replace('"', '"')
             content = content.replace("'", "'").replace("'", "'")
-            
             content = content.replace("--", "—")
             
             file_id = f"chapter-{i}"
@@ -305,6 +372,31 @@ class GutenbergToStandardEbooks:
                 id=file_id,
                 content=content
             )
+            
+            try:
+                etree.fromstring(xhtml_content.encode('utf-8'))
+            except etree.XMLSyntaxError as e:
+                print(f"Warning: XML syntax error in chapter {i}. Attempting to fix...")
+                content = self._fix_xml_issues(content)
+                xhtml_content = xhtml_template.format(
+                    language=self.language,
+                    title=title,
+                    id=file_id,
+                    content=content
+                )
+                
+                try:
+                    etree.fromstring(xhtml_content.encode('utf-8'))
+                    print(f"Successfully fixed XML for chapter {i}")
+                except etree.XMLSyntaxError as e:
+                    print(f"Error: Could not fix XML for chapter {i}. Using basic content instead.")
+                    content = f"<p>Chapter content unavailable due to XML errors: {e}</p>"
+                    xhtml_content = xhtml_template.format(
+                        language=self.language,
+                        title=title,
+                        id=file_id,
+                        content=content
+                    )
             
             file_path = os.path.join(text_dir, file_name)
             with open(file_path, 'w', encoding='utf-8') as f:
@@ -318,8 +410,18 @@ class GutenbergToStandardEbooks:
         
         return True
     
+    def _fix_xml_issues(self, content):
+        soup = BeautifulSoup(f"<div>{content}</div>", 'html.parser')
+        clean_content = ''.join(str(tag) for tag in soup.div.contents)
+        
+        clean_content = clean_content.replace('&', '&amp;')
+        clean_content = re.sub(r'&amp;([a-zA-Z]+);', r'&\1;', clean_content)   
+        
+        clean_content = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', clean_content)
+        
+        return clean_content
+    
     def _update_toc(self, toc_entries):
-        """Update the table of contents file."""
         toc_path = os.path.join(self.project_dir, "src", "epub", "toc.xhtml")
         
         with open(toc_path, 'r', encoding='utf-8') as f:
@@ -330,7 +432,7 @@ class GutenbergToStandardEbooks:
         
         namespace = {
             "xhtml": "http://www.w3.org/1999/xhtml",
-            "epub": "http://www.idpf.org/2007/ops"  # Add the epub namespace
+            "epub": "http://www.idpf.org/2007/ops" 
         }
         nav = root.find(".//xhtml:nav[@epub:type='toc']", namespaces=namespace)
         
@@ -357,7 +459,6 @@ class GutenbergToStandardEbooks:
         return True
     
     def update_content_opf(self):
-        """Update the content.opf metadata file."""
         opf_path = os.path.join(self.project_dir, "src", "epub", "content.opf")
         
         try:
@@ -416,7 +517,6 @@ class GutenbergToStandardEbooks:
         return True
     
     def run_se_commands(self):
-        """Run Standard Ebooks commands to process the files."""
         if not self.project_dir:
             print("Project not initialized.")
             return False
@@ -429,30 +529,67 @@ class GutenbergToStandardEbooks:
             print("Running Standard Ebooks commands...")
             
             print("Running 'se prepare'...")
-            subprocess.run([self.se_path, "prepare-release", "."], check=True)
+            prepare_result = subprocess.run(
+                [self.se_path, "prepare-release", "."], 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False
+            )
+            
+            if prepare_result.returncode != 0:
+                print("Warning: 'se prepare' command returned errors:")
+                print(prepare_result.stderr)
+                print("Attempting to continue with build...")
             
             print("Running 'se build'...")
-            subprocess.run([self.se_path, "build", "."], check=True)
+            build_result = subprocess.run(
+                [self.se_path, "build", "."], 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False
+            )
+            
+            if build_result.returncode != 0:
+                print("Warning: 'se build' command returned errors:")
+                print(build_result.stderr)
+                print("Final epub may have issues.")
             
             print("Running 'se lint'...")
-            subprocess.run([self.se_path, "lint", "."], check=False)  # Don't fail on lint errors
+            lint_result = subprocess.run(
+                [self.se_path, "lint", "."], 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False
+            )
+            
+            if lint_result.returncode != 0:
+                print("Note: 'se lint' reported issues that should be fixed:")
+                print(lint_result.stdout)
             
             return True
-        except subprocess.CalledProcessError as e:
+        except Exception as e:
             print(f"Error running Standard Ebooks command: {e}")
             return False
         finally:
             os.chdir(original_dir)
     
     def convert(self):
-        """Run the full conversion process."""
-        if not self.load_html():
-            return False
+        content_loaded = False
         
-        if not self.clean_gutenberg_html():
-            return False
+        if self.markdown_file and self.load_markdown():
+            content_loaded = True
+        elif self.html_file and self.load_html():
+            if not self.clean_gutenberg_html():
+                return False
+            self.identify_chapters()
+            content_loaded = True
         
-        self.identify_chapters()
+        if not content_loaded:
+            print("No content loaded. Please provide either a markdown or HTML file.")
+            return False
         
         if not self.create_standard_ebooks_project():
             print("\nAutomatic project directory detection failed.")
@@ -485,20 +622,24 @@ class GutenbergToStandardEbooks:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Convert Project Gutenberg HTML to Standard Ebooks format')
-    parser.add_argument('html_file', help='Path or URL to the Project Gutenberg HTML file')
+    parser = argparse.ArgumentParser(description='Convert Project Gutenberg HTML or markdown to Standard Ebooks format')
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument('--html', help='Path or URL to the Project Gutenberg HTML file')
+    input_group.add_argument('--markdown', help='Path to a markdown file with chapter format')
+    
     parser.add_argument('author', help='Author name in format "Firstname Lastname"')
     parser.add_argument('title', help='Book title')
     parser.add_argument('--language', default='en-US', help='Language code (default: en-US)')
     parser.add_argument('--year', type=int, help='Original publication year')
     parser.add_argument('--type', default='novel', choices=['novel', 'short-story', 'novella', 'anthology', 'non-fiction'],
-                        help='Work type (default: novel)')
+                      help='Work type (default: novel)')
     parser.add_argument('--subjects', nargs='+', help='Subject tags (e.g., "Fiction" "Romance")')
     
     args = parser.parse_args()
     
     converter = GutenbergToStandardEbooks(
-        html_file=args.html_file,
+        html_file=args.html,
+        markdown_file=args.markdown,
         author_name=args.author,
         book_title=args.title,
         language=args.language,
